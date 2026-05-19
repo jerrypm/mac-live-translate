@@ -149,6 +149,58 @@ final class TranslatePresenterTests: XCTestCase {
         XCTAssertNil(presenter.state.errorMessage)
     }
 
+    // MARK: - Finalize-on-pause (regression for: pausing mid-utterance lost text)
+
+    func test_toggleListening_whenListeningWithPendingUtterance_promotesToHistory() {
+        presenter.didChangeDownloadState(.ready)
+        presenter.didChangeListeningState(true)
+        presenter.didUpdateSourceText("谢谢")
+        presenter.didUpdateTranslation("Thank you")
+
+        presenter.toggleListening()
+
+        XCTAssertEqual(presenter.state.history.count, 1, "Pending utterance must be promoted on pause")
+        XCTAssertEqual(presenter.state.history.first?.chineseText, "谢谢")
+        XCTAssertEqual(presenter.state.history.first?.englishText, "Thank you")
+        XCTAssertEqual(presenter.state.sourceText, "")
+        XCTAssertEqual(presenter.state.translatedText, "")
+        XCTAssertEqual(interactor.stopCallCount, 1)
+    }
+
+    func test_toggleListening_whenListeningWithNoPendingUtterance_doesNotInsertEmptyEntry() {
+        presenter.didChangeDownloadState(.ready)
+        presenter.didChangeListeningState(true)
+
+        presenter.toggleListening()
+
+        XCTAssertTrue(presenter.state.history.isEmpty)
+        XCTAssertEqual(interactor.stopCallCount, 1)
+    }
+
+    func test_toggleListening_whenSourceWithoutTranslation_doesNotInsertPartialEntry() {
+        presenter.didChangeDownloadState(.ready)
+        presenter.didChangeListeningState(true)
+        presenter.didUpdateSourceText("谢谢")
+        // No translation yet
+
+        presenter.toggleListening()
+
+        XCTAssertTrue(presenter.state.history.isEmpty,
+                      "Don't record a half-finished utterance with no translation")
+    }
+
+    func test_viewDisappeared_withPendingUtterance_promotesToHistory() {
+        presenter.didChangeDownloadState(.ready)
+        presenter.didChangeListeningState(true)
+        presenter.didUpdateSourceText("你好")
+        presenter.didUpdateTranslation("Hello")
+
+        presenter.viewDisappeared()
+
+        XCTAssertEqual(presenter.state.history.count, 1)
+        XCTAssertEqual(interactor.stopCallCount, 1)
+    }
+
     // MARK: - Retry flow (regression for Bug: retry button did nothing)
 
     func test_retryDownload_clearsError_resetsService_andRechecks() {

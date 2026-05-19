@@ -43,12 +43,16 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
     }
 
     func viewDisappeared() {
+        finalizePendingUtterance()
         interactor.stopListening()
     }
 
     func toggleListening() {
         guard canListen else { return }
         if state.isListening {
+            // Pausing mid-utterance would otherwise lose the current text -
+            // promote it to history before tearing down the speech session.
+            finalizePendingUtterance()
             interactor.stopListening()
         } else {
             interactor.startListening()
@@ -115,5 +119,18 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
     func didEncounterError(_ message: String) {
         state.errorMessage = message
         state.isListening = false
+    }
+
+    // MARK: - Helpers
+
+    /// Move any in-progress utterance to history before pausing/stopping.
+    /// The Apple speech recognizer only emits a final result on natural
+    /// silence; if the user toggles the mic off mid-sentence we'd lose the
+    /// text without this. Skipped if either pane is empty.
+    private func finalizePendingUtterance() {
+        let chinese = state.sourceText
+        let english = state.translatedText
+        guard !chinese.isEmpty, !english.isEmpty else { return }
+        didFinishUtterance(chinese: chinese, english: english)
     }
 }
