@@ -4,13 +4,18 @@
 //
 //  Created by JPM on 19/05/26.
 //
-//  Wraps Apple Translation framework (macOS 15+) for on-device zh -> en.
+//  Orchestrates the on-device zh -> en translation lifecycle: preflight,
+//  prepare, verify, and translate. Delegates the time-based progress
+//  display to `DownloadProgressTicker` and the install verification to
+//  `TranslationInstallVerifier`. All tuning lives in
+//  `TranslationDownloadConfig` so behavior can be adjusted in one place.
 //
-//  Important: `prepareTranslation()` can resolve before the on-device model
-//  is fully installed (e.g. when the user dismisses the OS sheet). The source
-//  of truth is `LanguageAvailability().status`. After the framework signals
-//  completion we poll availability until it reports `.installed`, otherwise
-//  the overlay would close while files are still downloading.
+//  Apple framework hazards this layer protects against:
+//  - `prepareTranslation()` may hang; wrapped in `withTimeout`.
+//  - `LanguageAvailability.status` may lag reality; verifier also probes
+//    with a real test translation.
+//  - The whole attach flow has a hard overall deadline so the UI cannot
+//    sit at "downloading" forever.
 //
 
 import Foundation
@@ -25,133 +30,251 @@ final class TranslationService: Translating {
 
     private(set) var isReady = false
     private(set) var downloadState: TranslationDownloadState = .idle {
-        didSet {
-            if oldValue != downloadState {
-                onDownloadStateChange?(downloadState)
-            }
+        didSet { handleStateChange(from: oldValue, to: downloadState) }
+    }
+    private(set) var downloadProgress: DownloadProgress = .zero {
+        didSet { notifyIfProgressChanged(from: oldValue) }
+    }
+
+    var onDownloadStateChange: ((TranslationDownloadState) -> Void)?
+    var onDownloadProgressChange: ((DownloadProgress) -> Void)?
+
+    // MARK: - Dependencies
+
+    private let config: TranslationDownloadConfig
+    private let progressTicker: DownloadProgressTicker
+
+    // MARK: - Per-attempt state
+
+    private var session: TranslationSession?
+    private var currentSource: String
+    private var currentTarget: String
+    private var attachTask: Task<Void, Never>?
+
+    // MARK: - Init
+
+    init(
+        config: TranslationDownloadConfig? = nil,
+        sourceLanguage: String? = nil,
+        targetLanguage: String? = nil
+    ) {
+        let resolvedConfig = config ?? TranslationDownloadConfig()
+        self.config = resolvedConfig
+        self.currentSource = sourceLanguage ?? Strings.Locale.sourceChinese
+        self.currentTarget = targetLanguage ?? Strings.Locale.targetEnglish
+        self.progressTicker = DownloadProgressTicker(config: resolvedConfig)
+
+        progressTicker.onTick = { [weak self] progress in
+            self?.downloadProgress = progress
         }
     }
 
-    /// Fires whenever `downloadState` changes.
-    var onDownloadStateChange: ((TranslationDownloadState) -> Void)?
+    // MARK: - Translating
 
-    // MARK: - Tuning
+    func checkAvailability(source: String? = nil, target: String? = nil) async {
+        guard downloadState == .idle else { return }
 
-    private let pollInterval: TimeInterval = 1.0
-    private let pollMaxAttempts: Int = 120 // up to ~2 minutes
-
-    // MARK: - Private
-
-    private var session: TranslationSession?
-    private var currentSource = Strings.Locale.sourceChinese
-    private var currentTarget = Strings.Locale.targetEnglish
-
-    // MARK: - Preflight
-
-    func checkAvailability(
-        source: String? = nil,
-        target: String? = nil
-    ) async {
-        let src = source ?? Strings.Locale.sourceChinese
-        let tgt = target ?? Strings.Locale.targetEnglish
-        currentSource = src
-        currentTarget = tgt
+        currentSource = source ?? currentSource
+        currentTarget = target ?? currentTarget
 
         downloadState = .checking
 
-        let status = await currentInstallStatus()
-        switch status {
+        switch await makeVerifier().snapshot() {
         case .installed:
-            isReady = true
-            downloadState = .ready
-        case .supported:
-            // Not installed yet - .translationTask will trigger the OS sheet.
-            downloadState = .downloading
+            markReady()
         case .unsupported:
-            downloadState = .failed(Strings.Error.translationUnavailable)
-        @unknown default:
-            downloadState = .failed(Strings.Error.translationUnavailable)
-        }
-    }
-
-    // MARK: - Configuration
-
-    func makeConfiguration(
-        source: String? = nil,
-        target: String? = nil
-    ) -> TranslationSession.Configuration {
-        TranslationSession.Configuration(
-            source: Locale.Language(identifier: source ?? Strings.Locale.sourceChinese),
-            target: Locale.Language(identifier: target ?? Strings.Locale.targetEnglish)
-        )
-    }
-
-    /// Called by the view from inside `.translationTask`. Marks state `.ready`
-    /// only after `LanguageAvailability` reports `.installed` - `prepareTranslation`
-    /// alone is unreliable.
-    func attach(_ session: TranslationSession) async {
-        self.session = session
-
-        if downloadState == .idle || downloadState == .checking {
+            markFailed(.languageUnsupported)
+        case .proceedToDownload:
             downloadState = .downloading
         }
-
-        do {
-            try await session.prepareTranslation()
-            Logger.translation.info("prepareTranslation returned - verifying install")
-        } catch {
-            Logger.translation.error("prepareTranslation failed: \(error.localizedDescription)")
-            downloadState = .failed(error.localizedDescription)
-            return
-        }
-
-        await waitUntilInstalled()
     }
 
-    func detach() {
+    func reset() {
+        cancelInflightWork()
         session = nil
         isReady = false
+        downloadProgress = .zero
         downloadState = .idle
     }
-
-    // MARK: - Translate
 
     func translate(_ text: String) async -> String? {
         guard !text.isEmpty, let session else { return nil }
         do {
-            let response = try await session.translate(text)
-            return response.targetText
+            return try await session.translate(text).targetText
         } catch {
             Logger.translation.error("translate failed: \(error.localizedDescription)")
             return nil
         }
     }
 
-    // MARK: - Install verification
+    // MARK: - View bridge
 
-    private func currentInstallStatus() async -> LanguageAvailability.Status {
-        await LanguageAvailability().status(
-            from: Locale.Language(identifier: currentSource),
-            to: Locale.Language(identifier: currentTarget)
+    /// SwiftUI binds this to `.translationTask(configuration:)`. Replace it
+    /// to make the framework re-vend a session (used by the retry flow).
+    func makeConfiguration(
+        source: String? = nil,
+        target: String? = nil
+    ) -> TranslationSession.Configuration {
+        TranslationSession.Configuration(
+            source: Locale.Language(identifier: source ?? currentSource),
+            target: Locale.Language(identifier: target ?? currentTarget)
         )
     }
 
-    private func waitUntilInstalled() async {
-        for attempt in 0..<pollMaxAttempts {
-            let status = await currentInstallStatus()
-            if status == .installed {
-                isReady = true
-                downloadState = .ready
-                Logger.translation.info("Translation model installed after \(attempt) poll attempts")
-                return
-            }
-            if status == .unsupported {
-                downloadState = .failed(Strings.Error.translationUnavailable)
-                return
-            }
-            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+    /// Called by the view from inside `.translationTask` once the session is live.
+    func attach(_ session: TranslationSession) async {
+        self.session = session
+
+        if downloadState == .ready, isReady { return }
+
+        if downloadState != .downloading {
+            downloadState = .downloading
         }
 
-        downloadState = .failed(Strings.Error.translationUnavailable)
+        attachTask?.cancel()
+        let task: Task<Void, Never> = Task { [weak self] in
+            guard let self else { return }
+            await self.runAttachOrchestration(using: session)
+        }
+        attachTask = task
+        await task.value
+    }
+
+    func detach() {
+        cancelInflightWork()
+        session = nil
+        isReady = false
+        downloadState = .idle
+    }
+
+    // MARK: - Attach orchestration
+
+    private func runAttachOrchestration(using session: TranslationSession) async {
+        do {
+            try await withTimeout(
+                seconds: config.overallAttachBudgetSeconds,
+                operationName: "translation download"
+            ) { [weak self] in
+                guard let self else { return }
+                try await self.prepareAndVerify(using: session)
+            }
+        } catch is TimeoutError {
+            markFailed(.downloadTimedOut)
+        } catch is CancellationError {
+            Logger.translation.info("Attach cancelled")
+        } catch let failure as TranslationFailure {
+            markFailed(failure)
+        } catch {
+            markFailed(.prepareFailed(error.localizedDescription))
+        }
+    }
+
+    private func prepareAndVerify(using session: TranslationSession) async throws {
+        await runPrepareTranslation(using: session)
+        try await runVerification(using: session)
+    }
+
+    /// `prepareTranslation()` triggers Apple's download UI. If it hangs we
+    /// don't fail outright - the model may still finish installing in the
+    /// background, so we let the verification step decide.
+    private func runPrepareTranslation(using session: TranslationSession) async {
+        do {
+            try await withTimeout(
+                seconds: config.prepareTimeoutSeconds,
+                operationName: "prepareTranslation"
+            ) {
+                try await session.prepareTranslation()
+            }
+            Logger.translation.info("prepareTranslation returned - verifying install")
+        } catch {
+            Logger.translation.info("prepareTranslation timed out - falling back to verifier")
+        }
+    }
+
+    private func runVerification(using session: TranslationSession) async throws {
+        switch try await makeVerifier().verify(using: session) {
+        case .installed:
+            markReady()
+        case .unsupported:
+            throw TranslationFailure.languageUnsupported
+        case .timedOut:
+            throw TranslationFailure.downloadTimedOut
+        }
+    }
+
+    // MARK: - State helpers
+
+    private func markReady() {
+        isReady = true
+        downloadState = .ready
+    }
+
+    private func markFailed(_ failure: TranslationFailure) {
+        downloadState = .failed(failure.userMessage)
+    }
+
+    private func handleStateChange(
+        from old: TranslationDownloadState,
+        to new: TranslationDownloadState
+    ) {
+        guard old != new else { return }
+        onDownloadStateChange?(new)
+        applySideEffects(forEntering: new)
+    }
+
+    private func applySideEffects(forEntering state: TranslationDownloadState) {
+        switch state {
+        case .downloading:
+            progressTicker.start()
+        case .ready:
+            progressTicker.stop()
+            downloadProgress = DownloadProgress(
+                elapsedSeconds: downloadProgress.elapsedSeconds,
+                estimatedPercent: 100
+            )
+        case .failed, .idle:
+            progressTicker.stop()
+            downloadProgress = .zero
+        case .checking:
+            break
+        }
+    }
+
+    private func notifyIfProgressChanged(from old: DownloadProgress) {
+        guard old != downloadProgress else { return }
+        onDownloadProgressChange?(downloadProgress)
+    }
+
+    private func cancelInflightWork() {
+        attachTask?.cancel()
+        attachTask = nil
+        progressTicker.stop()
+    }
+
+    private func makeVerifier() -> TranslationInstallVerifier {
+        TranslationInstallVerifier(
+            sourceLanguage: currentSource,
+            targetLanguage: currentTarget,
+            config: config
+        )
+    }
+}
+
+// MARK: - Local failure type
+
+private enum TranslationFailure: Error {
+    case languageUnsupported
+    case downloadTimedOut
+    case prepareFailed(String)
+
+    var userMessage: String {
+        switch self {
+        case .languageUnsupported:
+            return Strings.Error.translationLanguagePairUnsupported
+        case .downloadTimedOut:
+            return Strings.Error.translationDownloadTimeout
+        case .prepareFailed(let detail):
+            return String(format: Strings.Error.translationPrepareFailedFormat, detail)
+        }
     }
 }

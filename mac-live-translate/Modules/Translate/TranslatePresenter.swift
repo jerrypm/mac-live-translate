@@ -5,8 +5,8 @@
 //  Created by JPM on 19/05/26.
 //
 //  Holds display state for TranslateView. Mediates between view and interactor.
-//  Listening is gated on the translation model being fully installed - the mic
-//  must not start until `downloadState == .ready`.
+//  Listening is gated on the translation model being fully installed.
+//  Finalized utterances become history entries.
 //
 
 import Foundation
@@ -19,7 +19,6 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
 
     private(set) var state: TranslationState = .initial
 
-    /// True only when the translation model is fully installed and listening is allowed.
     var canListen: Bool { state.downloadState == .ready }
 
     // MARK: - Dependencies
@@ -28,7 +27,6 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
 
     // MARK: - Internal flags
 
-    /// Auto-start listening once on the first ready transition. After that, respect user's toggle.
     private var hasAutoStarted = false
 
     // MARK: - Init
@@ -40,8 +38,8 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
     // MARK: - TranslatePresenterInput
 
     func viewAppeared() {
+        state.errorMessage = nil
         interactor.checkTranslationAvailability()
-        // Listening intentionally NOT started here - gated on `.ready`.
     }
 
     func viewDisappeared() {
@@ -57,6 +55,20 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
         }
     }
 
+    func retryDownload() {
+        state.errorMessage = nil
+        interactor.resetTranslation()
+        interactor.checkTranslationAvailability()
+    }
+
+    func deleteHistoryEntry(_ id: UUID) {
+        state.history.removeAll { $0.id == id }
+    }
+
+    func clearHistory() {
+        state.history.removeAll()
+    }
+
     // MARK: - TranslateInteractorOutput
 
     func didUpdateSourceText(_ text: String) {
@@ -66,6 +78,13 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
 
     func didUpdateTranslation(_ text: String) {
         state.translatedText = text
+    }
+
+    func didFinishUtterance(chinese: String, english: String) {
+        let entry = TranslationEntry(chineseText: chinese, englishText: english)
+        state.history.insert(entry, at: 0)
+        state.sourceText = ""
+        state.translatedText = ""
     }
 
     func didChangeListeningState(_ isListening: Bool) {
@@ -78,15 +97,19 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
         switch downloadState {
         case .failed(let message):
             state.errorMessage = message
-        case .ready:
+        case .checking, .downloading, .ready:
             state.errorMessage = nil
-            if !hasAutoStarted {
+            if case .ready = downloadState, !hasAutoStarted {
                 hasAutoStarted = true
                 interactor.startListening()
             }
-        case .idle, .checking, .downloading:
+        case .idle:
             break
         }
+    }
+
+    func didUpdateDownloadProgress(_ progress: DownloadProgress) {
+        state.downloadProgress = progress
     }
 
     func didEncounterError(_ message: String) {

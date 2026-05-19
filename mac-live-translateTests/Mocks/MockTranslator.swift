@@ -3,7 +3,7 @@
 //  mac-live-translateTests
 //
 //  In-memory Translating for tests. Returns canned translations + lets
-//  tests drive download state changes.
+//  tests drive download state and progress changes.
 //
 
 import Foundation
@@ -14,16 +14,14 @@ final class MockTranslator: Translating {
 
     // MARK: - Configuration
 
-    /// If set, `translate(_:)` returns this string. Defaults to "[en] <input>".
     var stubTranslation: String?
-
-    /// Set to true to simulate translation failure (returns nil).
     var shouldFailTranslate = false
 
     // MARK: - Recorded calls
 
     private(set) var translateInputs: [String] = []
     private(set) var checkAvailabilityCallCount = 0
+    private(set) var resetCallCount = 0
 
     // MARK: - Protocol surface
 
@@ -35,13 +33,30 @@ final class MockTranslator: Translating {
         }
     }
 
+    var downloadProgress: DownloadProgress = .zero {
+        didSet {
+            if oldValue != downloadProgress {
+                onDownloadProgressChange?(downloadProgress)
+            }
+        }
+    }
+
     var onDownloadStateChange: ((TranslationDownloadState) -> Void)?
+    var onDownloadProgressChange: ((DownloadProgress) -> Void)?
 
     // MARK: - Translating
 
     func checkAvailability(source: String?, target: String?) async {
         checkAvailabilityCallCount += 1
-        downloadState = .ready
+        if downloadState == .idle {
+            downloadState = .ready
+        }
+    }
+
+    func reset() {
+        resetCallCount += 1
+        downloadState = .idle
+        downloadProgress = .zero
     }
 
     func translate(_ text: String) async -> String? {
@@ -54,5 +69,9 @@ final class MockTranslator: Translating {
 
     func simulateDownloadState(_ state: TranslationDownloadState) {
         downloadState = state
+    }
+
+    func simulateDownloadProgress(_ progress: DownloadProgress) {
+        downloadProgress = progress
     }
 }

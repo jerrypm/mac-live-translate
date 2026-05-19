@@ -39,13 +39,31 @@ enum Strings {
         static let downloadInProgress = "Downloading translation models"
         static let downloadFailed = "Translation download failed"
         static let downloadSubtitle = "First-run only. This may take a few minutes. The model stays on your device for offline use."
+        static let downloadEstimateSuffix = "estimated"
+        static let downloadElapsedFormat = "%ds elapsed"
         static let retry = "Retry"
+
+        static let historyTitle = "History"
+        static let historyEmpty = "No translations yet. Start speaking Chinese."
+        static let historyClearAll = "Clear all"
+        static let historyDelete = "Delete entry"
+        static let historyCountFormat = "%d entries"
+
+        static let downloadTakingLong = "Taking longer than expected. Tap Cancel and retry if the download appears stuck."
+        static let downloadCancel = "Cancel and retry"
     }
 
     enum Error {
         static let micDenied = "Microphone access denied. Enable in System Settings."
         static let speechDenied = "Speech recognition denied. Enable in System Settings."
         static let recognizerUnavailable = "Chinese speech recognizer unavailable on this device."
-        static let translationUnavailable = "Translation unavailable. Check macOS version (requires 15+)."
+        static let recognizerKeepsFailing = "Speech recognition keeps failing. Tap the mic to try again."
+
+        /// Used when LanguageAvailability reports `.unsupported`.
+        static let translationLanguagePairUnsupported = "Chinese ↔ English translation isn't available on this Mac. macOS 15 or later is required."
+        /// Used when waitUntilInstalled exceeds its retry budget.
+        static let translationDownloadTimeout = "Translation model download timed out. Check your internet connection and retry."
+        /// Used when prepareTranslation throws (system error).
+        static let translationPrepareFailedFormat = "Translation could not be prepared: %@"
     }
 }

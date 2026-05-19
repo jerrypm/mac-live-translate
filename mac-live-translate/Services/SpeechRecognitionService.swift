@@ -6,6 +6,8 @@
 //
 //  Wraps Apple Speech framework for continuous on-device Chinese (zh-CN)
 //  recognition. Auto-restarts after each final utterance for live-feel.
+//  Restarts on transient errors are rate-limited so a broken recognizer
+//  cannot hot-loop.
 //
 
 import AVFoundation
@@ -17,15 +19,19 @@ final class SpeechRecognitionService: SpeechRecognizing {
 
     // MARK: - Callbacks
 
-    /// Fires on every partial + final transcript update with the raw recognized text.
     var onTranscript: ((String, _ isFinal: Bool) -> Void)?
-
-    /// Fires when an unrecoverable error occurs.
     var onError: ((String) -> Void)?
 
     // MARK: - State
 
     private(set) var isRunning = false
+
+    // MARK: - Tuning
+
+    /// "No speech detected" is a normal silence - don't count against the limit.
+    private let silenceErrorCode = 1110
+    /// Max consecutive non-silence error restarts before giving up.
+    private let maxConsecutiveErrorRestarts = 5
 
     // MARK: - Private
 
@@ -33,6 +39,7 @@ final class SpeechRecognitionService: SpeechRecognizing {
     private let audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    private var consecutiveErrorRestarts = 0
 
     // MARK: - Init
 
@@ -50,9 +57,7 @@ final class SpeechRecognitionService: SpeechRecognizing {
                 switch status {
                 case .authorized:
                     self.start()
-                case .denied, .restricted:
-                    self.onError?(Strings.Error.speechDenied)
-                case .notDetermined:
+                case .denied, .restricted, .notDetermined:
                     self.onError?(Strings.Error.speechDenied)
                 @unknown default:
                     self.onError?(Strings.Error.speechDenied)
@@ -68,6 +73,8 @@ final class SpeechRecognitionService: SpeechRecognizing {
             return
         }
 
+        consecutiveErrorRestarts = 0
+
         do {
             try beginSession(using: recognizer)
             isRunning = true
@@ -80,13 +87,11 @@ final class SpeechRecognitionService: SpeechRecognizing {
 
     func stop() {
         guard isRunning else { return }
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
+        teardownAudio()
         task?.cancel()
-        request = nil
         task = nil
         isRunning = false
+        consecutiveErrorRestarts = 0
         Logger.speech.info("Recognition session stopped")
     }
 
@@ -109,35 +114,58 @@ final class SpeechRecognitionService: SpeechRecognizing {
         audioEngine.prepare()
         try audioEngine.start()
 
+        // SFSpeechRecognitionTask's completion may fire on a background queue.
+        // Hop to the main actor explicitly before touching any class state.
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
-            if let result {
-                let text = result.bestTranscription.formattedString
-                self.onTranscript?(text, result.isFinal)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.handleRecognitionCallback(result: result, error: error)
+            }
+        }
+    }
 
-                if result.isFinal {
-                    self.restartSession()
-                }
+    private func handleRecognitionCallback(
+        result: SFSpeechRecognitionResult?,
+        error: Error?
+    ) {
+        if let result {
+            consecutiveErrorRestarts = 0
+            let text = result.bestTranscription.formattedString
+            onTranscript?(text, result.isFinal)
+
+            if result.isFinal {
+                restartSession()
+            }
+        }
+
+        if let error {
+            let nsError = error as NSError
+            if nsError.code == silenceErrorCode {
+                // Silence is normal - free restart.
+                restartSession()
+                return
             }
 
-            if let error {
-                let nsError = error as NSError
-                // Code 1110 = "No speech detected" - normal silence, just restart.
-                if nsError.code == 1110 {
-                    self.restartSession()
-                } else {
-                    Logger.speech.error("Recognition error: \(error.localizedDescription)")
-                    self.restartSession()
-                }
+            consecutiveErrorRestarts += 1
+            Logger.speech.error("Recognition error (\(self.consecutiveErrorRestarts)/\(self.maxConsecutiveErrorRestarts)): \(error.localizedDescription)")
+
+            if consecutiveErrorRestarts >= maxConsecutiveErrorRestarts {
+                Logger.speech.error("Hit max consecutive error restarts - giving up")
+                teardownAudio()
+                task = nil
+                isRunning = false
+                consecutiveErrorRestarts = 0
+                onError?(Strings.Error.recognizerKeepsFailing)
+                return
             }
+
+            restartSession()
         }
     }
 
     private func restartSession() {
         guard isRunning else { return }
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
+        teardownAudio()
         task = nil
         request = nil
 
@@ -149,5 +177,12 @@ final class SpeechRecognitionService: SpeechRecognizing {
             isRunning = false
             onError?(error.localizedDescription)
         }
+    }
+
+    private func teardownAudio() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+        request = nil
     }
 }

@@ -5,7 +5,7 @@
 //  Created by JPM on 19/05/26.
 //
 //  Owns the speech + translation services. Filters out non-Chinese noise,
-//  debounces partial transcripts, and forwards results to the presenter.
+//  debounces partial transcripts, and routes final utterances to history.
 //
 
 import Foundation
@@ -21,7 +21,7 @@ final class TranslateInteractor: TranslateInteractorInput {
     private let speechService: SpeechRecognizing
     private let translationService: Translating
 
-    // MARK: - Debounce
+    // MARK: - Debounce + dedup
 
     private var debounceTask: Task<Void, Never>?
     private var lastTranslatedText: String = ""
@@ -56,6 +56,10 @@ final class TranslateInteractor: TranslateInteractorInput {
         }
     }
 
+    func resetTranslation() {
+        translationService.reset()
+    }
+
     // MARK: - Wiring
 
     private func wireCallbacks() {
@@ -76,6 +80,12 @@ final class TranslateInteractor: TranslateInteractorInput {
                 self?.output?.didChangeDownloadState(state)
             }
         }
+
+        translationService.onDownloadProgressChange = { [weak self] progress in
+            Task { @MainActor in
+                self?.output?.didUpdateDownloadProgress(progress)
+            }
+        }
     }
 
     // MARK: - Transcript pipeline
@@ -90,7 +100,7 @@ final class TranslateInteractor: TranslateInteractorInput {
 
         if isFinal {
             debounceTask?.cancel()
-            translateNow(text)
+            translateNow(text, isFinal: true)
         } else {
             scheduleDebouncedTranslate(text)
         }
@@ -103,18 +113,27 @@ final class TranslateInteractor: TranslateInteractorInput {
                 nanoseconds: UInt64(Metrics.Duration.translateDebounce * 1_000_000_000)
             )
             guard !Task.isCancelled else { return }
-            self?.translateNow(text)
+            self?.translateNow(text, isFinal: false)
         }
     }
 
-    private func translateNow(_ text: String) {
-        guard text != lastTranslatedText else { return }
+    private func translateNow(_ text: String, isFinal: Bool) {
+        // Dedup applies to partials so we don't re-translate the same prefix
+        // back-to-back; finals always emit so two identical utterances both
+        // land in history.
+        if !isFinal, text == lastTranslatedText { return }
         lastTranslatedText = text
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard let translated = await self.translationService.translate(text) else { return }
-            self.output?.didUpdateTranslation(translated)
+
+            if isFinal {
+                self.output?.didFinishUtterance(chinese: text, english: translated)
+                self.lastTranslatedText = ""
+            } else {
+                self.output?.didUpdateTranslation(translated)
+            }
         }
     }
 }

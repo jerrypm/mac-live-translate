@@ -14,6 +14,8 @@ struct TranslationState: Equatable {
     var translatedText: String
     var isListening: Bool
     var downloadState: TranslationDownloadState
+    var downloadProgress: DownloadProgress
+    var history: [TranslationEntry]
     var errorMessage: String?
 
     static let initial = TranslationState(
@@ -21,6 +23,8 @@ struct TranslationState: Equatable {
         translatedText: "",
         isListening: false,
         downloadState: .idle,
+        downloadProgress: .zero,
+        history: [],
         errorMessage: nil
     )
 }

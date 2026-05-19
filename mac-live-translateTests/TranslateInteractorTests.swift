@@ -2,8 +2,8 @@
 //  TranslateInteractorTests.swift
 //  mac-live-translateTests
 //
-//  Covers the transcript pipeline: CJK filter, debounce, dedup,
-//  start/stop wiring, and download-state forwarding.
+//  Covers the transcript pipeline: CJK filter, debounce, dedup, history
+//  finalization, start/stop wiring, and download-state + progress forwarding.
 //
 
 import XCTest
@@ -11,8 +11,6 @@ import XCTest
 
 @MainActor
 final class TranslateInteractorTests: XCTestCase {
-
-    // MARK: - System under test
 
     private var speech: MockSpeechRecognizer!
     private var translator: MockTranslator!
@@ -60,47 +58,59 @@ final class TranslateInteractorTests: XCTestCase {
 
     func test_nonChineseTranscript_isIgnored() async {
         speech.emitTranscript("Hello world", isFinal: false)
-
         await waitForMainLoop()
 
         XCTAssertTrue(output.sourceTexts.isEmpty)
         XCTAssertTrue(translator.translateInputs.isEmpty)
     }
 
-    func test_chineseFinalTranscript_translatesImmediately() async {
+    func test_chineseFinalTranscript_emitsFinishUtterance_notUpdateTranslation() async {
         speech.emitTranscript("你好", isFinal: true)
-
         await waitForMainLoop()
 
         XCTAssertEqual(output.sourceTexts, ["你好"])
         XCTAssertEqual(translator.translateInputs, ["你好"])
-        XCTAssertEqual(output.translations, ["[en] 你好"])
+        XCTAssertEqual(output.finishedUtterances.count, 1)
+        XCTAssertEqual(output.finishedUtterances.first?.chinese, "你好")
+        XCTAssertEqual(output.finishedUtterances.first?.english, "[en] 你好")
+        XCTAssertTrue(output.translations.isEmpty, "Final translations go to didFinishUtterance, not didUpdateTranslation")
     }
 
-    func test_chinesePartial_debounces_thenTranslates() async {
+    func test_chinesePartial_debounces_thenEmitsUpdateTranslation() async {
         speech.emitTranscript("你好", isFinal: false)
         await waitForMainLoop()
         XCTAssertEqual(output.sourceTexts, ["你好"])
-        // Translator not invoked immediately on partial.
         XCTAssertTrue(translator.translateInputs.isEmpty)
 
-        // Debounce is 0.3s - wait well past it.
         try? await Task.sleep(nanoseconds: 700_000_000)
 
         XCTAssertEqual(translator.translateInputs, ["你好"])
+        XCTAssertEqual(output.translations, ["[en] 你好"])
+        XCTAssertTrue(output.finishedUtterances.isEmpty, "Partial translations must not finalize a history entry")
     }
 
-    func test_duplicateText_skipsRedundantTranslate() async {
+    func test_duplicatePartial_isDeduped() async {
+        speech.emitTranscript("你好", isFinal: false)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        speech.emitTranscript("你好", isFinal: false)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertEqual(translator.translateInputs.count, 1, "Repeating the same partial must not re-translate")
+    }
+
+    func test_repeatedFinalUtterances_bothFinalize() async {
         speech.emitTranscript("你好", isFinal: true)
         await waitForMainLoop()
 
         speech.emitTranscript("你好", isFinal: true)
         await waitForMainLoop()
 
-        XCTAssertEqual(translator.translateInputs.count, 1)
+        XCTAssertEqual(output.finishedUtterances.count, 2,
+                       "Two separate final utterances of the same text must both land in history")
     }
 
-    // MARK: - Error forwarding
+    // MARK: - Error + state forwarding
 
     func test_speechError_forwardedToOutput() async {
         speech.emitError("mic denied")
@@ -109,13 +119,19 @@ final class TranslateInteractorTests: XCTestCase {
         XCTAssertEqual(output.errors, ["mic denied"])
     }
 
-    // MARK: - Download state forwarding
-
     func test_downloadStateChange_forwardedToOutput() async {
         translator.simulateDownloadState(.downloading)
         await waitForMainLoop()
 
         XCTAssertEqual(output.downloadStates, [.downloading])
+    }
+
+    func test_downloadProgressChange_forwardedToOutput() async {
+        let progress = DownloadProgress(elapsedSeconds: 10, estimatedPercent: 25)
+        translator.simulateDownloadProgress(progress)
+        await waitForMainLoop()
+
+        XCTAssertEqual(output.downloadProgress, [progress])
     }
 
     func test_checkTranslationAvailability_callsTranslator() async {
@@ -136,15 +152,24 @@ final class TranslateInteractorTests: XCTestCase {
 
 @MainActor
 private final class SpyOutput: TranslateInteractorOutput {
+    struct FinishedUtterance: Equatable {
+        let chinese: String
+        let english: String
+    }
+
     var sourceTexts: [String] = []
     var translations: [String] = []
+    var finishedUtterances: [FinishedUtterance] = []
     var listeningStates: [Bool] = []
     var downloadStates: [TranslationDownloadState] = []
+    var downloadProgress: [DownloadProgress] = []
     var errors: [String] = []
 
-    func didUpdateSourceText(_ text: String)               { sourceTexts.append(text) }
-    func didUpdateTranslation(_ text: String)              { translations.append(text) }
-    func didChangeListeningState(_ isListening: Bool)      { listeningStates.append(isListening) }
-    func didChangeDownloadState(_ s: TranslationDownloadState) { downloadStates.append(s) }
-    func didEncounterError(_ message: String)              { errors.append(message) }
+    func didUpdateSourceText(_ text: String)                      { sourceTexts.append(text) }
+    func didUpdateTranslation(_ text: String)                     { translations.append(text) }
+    func didFinishUtterance(chinese: String, english: String)     { finishedUtterances.append(.init(chinese: chinese, english: english)) }
+    func didChangeListeningState(_ isListening: Bool)             { listeningStates.append(isListening) }
+    func didChangeDownloadState(_ s: TranslationDownloadState)    { downloadStates.append(s) }
+    func didUpdateDownloadProgress(_ p: DownloadProgress)         { downloadProgress.append(p) }
+    func didEncounterError(_ message: String)                     { errors.append(message) }
 }
