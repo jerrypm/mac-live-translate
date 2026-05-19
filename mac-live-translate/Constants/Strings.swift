@@ -48,6 +48,8 @@ enum Strings {
         static let historyClearAll = "Clear all"
         static let historyDelete = "Delete entry"
         static let historyCountFormat = "%d entries"
+        static let addToHistory = "Add"
+        static let addToHistoryHelp = "Save the current sentence to history without stopping the mic"
 
         static let downloadTakingLong = "Taking longer than expected. Tap Cancel and retry if the download appears stuck."
         static let downloadCancel = "Cancel and retry"

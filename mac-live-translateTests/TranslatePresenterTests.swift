@@ -149,6 +149,47 @@ final class TranslatePresenterTests: XCTestCase {
         XCTAssertNil(presenter.state.errorMessage)
     }
 
+    // MARK: - Add-to-history button (keeps current panes intact)
+
+    func test_addCurrentToHistory_withPendingUtterance_insertsEntry_andKeepsPanes() {
+        presenter.didUpdateSourceText("你好")
+        presenter.didUpdateTranslation("Hello")
+
+        presenter.addCurrentToHistory()
+
+        XCTAssertEqual(presenter.state.history.count, 1)
+        XCTAssertEqual(presenter.state.history.first?.chineseText, "你好")
+        XCTAssertEqual(presenter.state.history.first?.englishText, "Hello")
+        XCTAssertEqual(presenter.state.sourceText, "你好",
+                       "Add must NOT clear the source pane")
+        XCTAssertEqual(presenter.state.translatedText, "Hello",
+                       "Add must NOT clear the translation pane")
+    }
+
+    func test_addCurrentToHistory_withEmptyPanes_isNoop() {
+        presenter.addCurrentToHistory()
+        XCTAssertTrue(presenter.state.history.isEmpty)
+    }
+
+    func test_addCurrentToHistory_withSourceOnly_isNoop() {
+        presenter.didUpdateSourceText("你好")
+
+        presenter.addCurrentToHistory()
+
+        XCTAssertTrue(presenter.state.history.isEmpty,
+                      "Don't record a half-finished entry with no translation")
+    }
+
+    func test_canAddCurrentToHistory_reflectsPaneContents() {
+        XCTAssertFalse(presenter.canAddCurrentToHistory)
+
+        presenter.didUpdateSourceText("你好")
+        XCTAssertFalse(presenter.canAddCurrentToHistory)
+
+        presenter.didUpdateTranslation("Hello")
+        XCTAssertTrue(presenter.canAddCurrentToHistory)
+    }
+
     // MARK: - Finalize-on-pause (regression for: pausing mid-utterance lost text)
 
     func test_toggleListening_whenListeningWithPendingUtterance_promotesToHistory() {

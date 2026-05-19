@@ -81,30 +81,49 @@ private struct HistoryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Metrics.Spacing.medium) {
-            Text(entry.chineseText)
-                .font(.body)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider().frame(height: 24)
-
-            Text(entry.englishText)
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(action: onDelete) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .frame(width: Metrics.Size.historyRowDeleteButton)
-            .help(Strings.UI.historyDelete)
+            chineseColumn
+            Divider().frame(minHeight: 32)
+            englishColumn
+            deleteButton
         }
         .padding(Metrics.Spacing.small)
         .background(
             RoundedRectangle(cornerRadius: Metrics.Corner.pill)
                 .fill(Color.secondary.opacity(0.06))
         )
+    }
+
+    /// Chinese characters with pinyin pronunciation underneath, so the user
+    /// can still read aloud entries they previously captured.
+    private var chineseColumn: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(entry.chineseText)
+                .font(.body)
+            let pinyin = entry.chineseText.pinyinDisplay
+            if !pinyin.isEmpty {
+                Text(pinyin)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var englishColumn: some View {
+        Text(entry.englishText)
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var deleteButton: some View {
+        Button(action: onDelete) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: Metrics.Size.historyRowDeleteButton)
+        .help(Strings.UI.historyDelete)
     }
 }

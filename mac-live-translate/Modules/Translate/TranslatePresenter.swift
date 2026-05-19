@@ -65,6 +65,22 @@ final class TranslatePresenter: TranslatePresenterInput, TranslateInteractorOutp
         interactor.checkTranslationAvailability()
     }
 
+    /// Snapshots the current utterance into history but keeps the live panes
+    /// populated so the user can keep speaking. Unlike pausing the mic, this
+    /// does NOT clear the source/translation text.
+    func addCurrentToHistory() {
+        let chinese = state.sourceText
+        let english = state.translatedText
+        guard !chinese.isEmpty, !english.isEmpty else { return }
+        let entry = TranslationEntry(chineseText: chinese, englishText: english)
+        state.history.insert(entry, at: 0)
+    }
+
+    /// True when there is a fully-translated utterance available to snapshot.
+    var canAddCurrentToHistory: Bool {
+        !state.sourceText.isEmpty && !state.translatedText.isEmpty
+    }
+
     func deleteHistoryEntry(_ id: UUID) {
         state.history.removeAll { $0.id == id }
     }

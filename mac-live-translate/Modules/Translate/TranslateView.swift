@@ -49,7 +49,9 @@ struct TranslateView: View {
 
             LiveTranscriptPanes(
                 sourceText: presenter.state.sourceText,
-                translatedText: presenter.state.translatedText
+                translatedText: presenter.state.translatedText,
+                canAdd: presenter.canAddCurrentToHistory,
+                onAdd: presenter.addCurrentToHistory
             )
 
             if let error = presenter.state.errorMessage {

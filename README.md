@@ -46,8 +46,13 @@ Everything stays on the device. No accounts, no API keys, no network calls after
 
 ## Screenshots
 
-> Pop these in once you have them — drop PNGs into `docs/` and reference like:
-> `![main UI](docs/screenshot-main.png)`
+<p align="center">
+  <img src="docs/screenshot-main.png" width="820" alt="Live Translate main window — Chinese with pinyin on the left, English translation on the right, history list with finalized utterances below">
+</p>
+
+<p align="center">
+  <em>Live transcript with pinyin pronunciation, mic indicator, and an automatically-captured history of finalized sentences.</em>
+</p>
 
 ## Requirements
 

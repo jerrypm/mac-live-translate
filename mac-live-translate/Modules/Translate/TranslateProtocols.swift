@@ -18,6 +18,7 @@ protocol TranslatePresenterInput: AnyObject {
     func viewDisappeared()
     func toggleListening()
     func retryDownload()
+    func addCurrentToHistory()
     func deleteHistoryEntry(_ id: UUID)
     func clearHistory()
 }
